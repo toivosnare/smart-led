@@ -1,0 +1,6 @@
+[submodule "server/pico-sdk"]
+	path = server/pico-sdk
+	url = https://github.com/raspberrypi/pico-sdk
+[submodule "server/mbedtls"]
+	path = server/mbedtls
+	url = https://github.com/Mbed-TLS/mbedtls.git

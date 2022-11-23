@@ -1,42 +1,50 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:web_socket_channel/io.dart';
-
-import 'package:web_socket_channel/web_socket_channel.dart';
-import 'package:after_layout/after_layout.dart';
 
 void main() {
   runApp(const SmartLEDApp());
 }
 
-class SmartLEDApp extends StatefulWidget {
-  static final navKey = GlobalKey<NavigatorState>();
+class SmartLEDApp extends StatelessWidget {
   const SmartLEDApp({super.key});
 
   @override
-  State<SmartLEDApp> createState() => _SmartLEDAppState();
+  Widget build(BuildContext context) {
+    return const MaterialApp(
+      title: 'Smart LED',
+      home: SmartLEDHomePage(),
+    );
+  }
 }
 
-class _SmartLEDAppState extends State<SmartLEDApp> {
-  final List<String> _messages = [];
-  final ScrollController _controller = ScrollController();
-  final TextEditingController _textEditingController = TextEditingController();
-  bool on = false;
-  late IOWebSocketChannel _channel;
-  bool connected = false;
+class SmartLEDHomePage extends StatefulWidget {
+  const SmartLEDHomePage({super.key});
 
-  Future<String?> getAddress() {
+  @override
+  State<SmartLEDHomePage> createState() => _SmartLEDHomePageState();
+}
+
+class _SmartLEDHomePageState extends State<SmartLEDHomePage> {
+  final List<String> _messages = [];
+  final ScrollController _scrollController = ScrollController();
+  final TextEditingController _textEditingController =
+      TextEditingController(text: "ws://");
+  late IOWebSocketChannel _channel;
+  bool _connected = false;
+  bool _ledOn = false;
+
+  Future<String?> getAddress(BuildContext context) {
     return showDialog<String>(
-        context: SmartLEDApp.navKey.currentState!.overlay!.context,
+        context: context,
         barrierDismissible: false,
         builder: (context) => AlertDialog(
-                title: const Text('Smart LED websocket server address'),
+                title: const Text('Enter Smart LED server address'),
                 content: TextField(
-                    controller: _textEditingController,
-                    decoration:
-                        const InputDecoration(hintText: 'ws://127.0.0.1')),
+                  controller: _textEditingController,
+                  keyboardType: TextInputType.url,
+                ),
                 actions: [
                   TextButton(
                     onPressed: () =>
@@ -51,15 +59,15 @@ class _SmartLEDAppState extends State<SmartLEDApp> {
     setState(() {
       _messages.add("$timestamp: $message");
     });
-    _controller.animateTo(
-      _controller.position.maxScrollExtent + 16,
+    _scrollController.animateTo(
+      _scrollController.position.maxScrollExtent + 16,
       duration: const Duration(milliseconds: 500),
       curve: Curves.easeOut,
     );
   }
 
-  void connect() async {
-    String? address = await getAddress();
+  void connect(BuildContext context) async {
+    String? address = await getAddress(context);
     if (address == null) {
       return;
     }
@@ -68,7 +76,7 @@ class _SmartLEDAppState extends State<SmartLEDApp> {
       _channel = IOWebSocketChannel.connect(address);
       _channel.stream.listen(onData, onError: onError);
       log("Connected succesfully.");
-      connected = true;
+      _connected = true;
     } catch (e) {
       log("Connect failed:");
       log(e.toString());
@@ -76,57 +84,65 @@ class _SmartLEDAppState extends State<SmartLEDApp> {
   }
 
   void onData(dynamic message) {
-    log("Received message:");
-    log(message.toString());
-    // dynamic decodedMessage = jsonDecode(message);
+    List<int> data = message;
+    if (data.length == 1) {
+      setState(() {
+        _ledOn = data[0] != 0;
+      });
+      String state = _ledOn ? "on" : "off";
+      log("Received LED state: $state.");
+    } else {
+      log("Received invalid message.");
+    }
   }
 
   void onError(Object error) {
     log("Channel error:");
     log(error.toString());
-    connected = false;
+    _connected = false;
   }
 
-  void onLEDTap() async {
-    if (connected) {
-      String request = on ? "off" : "on";
+  void onLEDTap(BuildContext context) async {
+    if (_connected) {
+      String request = _ledOn ? "off" : "on";
       log("Sending request to turn LED $request.");
-      _channel.sink.add(jsonEncode({
-        'state': request,
-      }));
+      _channel.sink.add([_ledOn ? 0 : 1]);
     } else {
-      connect();
+      connect(context);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      navigatorKey: SmartLEDApp.navKey,
-      title: 'Smart LED',
-      theme: ThemeData(
-        primarySwatch: Colors.blue,
-      ),
-      home: Scaffold(
-          backgroundColor: on
-              ? const Color.fromARGB(222, 255, 255, 255)
-              : const Color.fromARGB(255, 12, 12, 12),
-          body: GestureDetector(
-            onTap: onLEDTap,
-            child: CustomPaint(
-                foregroundPainter: LEDPainter(on),
-                child: ListView.builder(
-                    controller: _controller,
-                    padding: const EdgeInsets.all(8.0),
-                    itemCount: _messages.length,
-                    itemBuilder: ((context, index) {
-                      return Text(_messages[index],
-                          style: TextStyle(
-                              color: on ? Colors.black : Colors.green,
-                              fontWeight: FontWeight.bold));
-                    }))),
-          )),
-    );
+    return Scaffold(
+        backgroundColor: _ledOn
+            ? const Color.fromARGB(222, 255, 255, 255)
+            : const Color.fromARGB(255, 12, 12, 12),
+        body: GestureDetector(
+          onTap: () {
+            onLEDTap(context);
+          },
+          child: CustomPaint(
+              foregroundPainter: LEDPainter(_ledOn),
+              child: ListView.builder(
+                  controller: _scrollController,
+                  padding: const EdgeInsets.all(8.0),
+                  itemCount: _messages.length,
+                  itemBuilder: ((context, index) {
+                    return Text(_messages[index],
+                        style: TextStyle(
+                            color: _ledOn ? Colors.black : Colors.green,
+                            fontWeight: FontWeight.bold));
+                  }))),
+        ));
+  }
+
+  @override
+  void dispose() {
+    _channel.sink.close();
+    _scrollController.dispose();
+    _textEditingController.dispose();
+    super.dispose();
   }
 }
 
