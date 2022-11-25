@@ -8,6 +8,7 @@
 #include "pico/stdio.h"
 #include "pico/stdlib.h"
 #include "pico/error.h"
+#include "pico/printf.h"
 #include "pico/cyw43_arch.h"
 #include "hardware/flash.h"
 #include "hardware/sync.h"
@@ -39,6 +40,7 @@
 #define PORT 80
 #define SSID_SIZE 32
 #define PASSWORD_SIZE 64
+#define HTTP_RESPONSE_FORMAT "HTTP/1.1 %s\r\nServer: smart-led-server\r\nContent-Length: %zu\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n%s"
 
 struct WiFiCredentials {
   char ssid[SSID_SIZE];
@@ -56,11 +58,16 @@ static struct tcp_pcb *client_pcb = NULL;
 static unsigned char ws_frame[3] = {WS_FIN | WS_OP_BINARY, 1, 0};
 static bool *led_state = (bool *)&ws_frame[2];
 
-static void send_http_error() {
-  // TODO
+static void send_http_error(const char *status, const char *body) {
+  static unsigned char response[256];
+  if (connection_state != LISTENING) {
+    int response_length = sprintf(response, HTTP_RESPONSE_FORMAT, status, strlen(body), body);
+    tcp_write(client_pcb, response, response_length, 0);
+    tcp_output(client_pcb);
+  }
 }
 
-static void send_led_state() {
+static void send_led_state(void) {
   if (connection_state == ONLINE) {
     printf("Sending LED state (%s) to client.\n", *led_state ? "on" : "off");
     tcp_write(client_pcb, ws_frame, 3, 0);
@@ -83,10 +90,7 @@ static void handle_handshake(struct pbuf *p) {
 
   if (request_buf_length < 16 || memcmp(request_buf, "GET / HTTP/1.1\r\n", 16)) {
     printf("Invalid handshake request.\n");
-    send_http_error();
-    tcp_close(client_pcb);
-    client_pcb = NULL;
-    connection_state = LISTENING;
+    send_http_error("400 Bad Request", "Invalid status line.");
     request_buf_length = 0;
     return;
   }
@@ -129,10 +133,7 @@ static void handle_handshake(struct pbuf *p) {
 
   if (!connection_upgrade || !upgrade_websocket || !websocket_key) {
     printf("Invalid handshake request.\n");
-    send_http_error();
-    tcp_close(client_pcb);
-    client_pcb = NULL;
-    connection_state = LISTENING;
+    send_http_error("400 Bad Request", "Only websocket upgrades supported.");
     request_buf_length = 0;
     return;
   }
@@ -164,8 +165,12 @@ static void handle_handshake(struct pbuf *p) {
     send_led_state();
 }
 
-static void send_websocket_close_frame() {
-  // TODO
+static void send_websocket_close_frame(void) {
+  static unsigned char close_frame[2] = {WS_FIN | WS_OP_CLOSE, 0};
+  if (connection_state == ONLINE) {
+    tcp_write(client_pcb, close_frame, 2, 0);
+    tcp_output(client_pcb);
+  }
 }
 
 static void set_led_state(bool on) {
@@ -220,6 +225,7 @@ static void handle_online(struct pbuf *p) {
     set_led_state(value);
   } else if (opcode == WS_OP_CLOSE) {
     printf("Received close frame.\n");
+    send_websocket_close_frame();
     tcp_close(client_pcb);
     client_pcb = NULL;
     connection_state = LISTENING;
@@ -227,6 +233,7 @@ static void handle_online(struct pbuf *p) {
     return;
   } else {
     printf("Received frame with invalid opcode %u.\n", opcode);
+    send_websocket_close_frame();
     tcp_close(client_pcb);
     client_pcb = NULL;
     connection_state = LISTENING;
@@ -278,7 +285,6 @@ static err_t accept_callback(void *arg, struct tcp_pcb *pcb, err_t err) {
   if (connection_state != LISTENING) {
     printf("Not in listening state.\n");
     tcp_close(pcb);
-    client_pcb = NULL;
     return ERR_OK;
   }
   printf("Client connected.\n");
