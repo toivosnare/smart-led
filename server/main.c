@@ -1,9 +1,16 @@
 #include <ctype.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <assert.h>
 
+#include "boards/pico_w.h"
+#include "pico/stdio.h"
 #include "pico/stdlib.h"
+#include "pico/error.h"
 #include "pico/cyw43_arch.h"
+#include "hardware/flash.h"
+#include "hardware/sync.h"
 
 #include "lwip/tcp.h"
 #include "lwip/pbuf.h"
@@ -30,6 +37,14 @@
 #define REQUEST_BUF_SIZE 512
 #define BASE64_ENCODED_SIZE 29
 #define PORT 80
+#define SSID_SIZE 32
+#define PASSWORD_SIZE 64
+
+struct WiFiCredentials {
+  char ssid[SSID_SIZE];
+  char password[PASSWORD_SIZE];
+  char padding[160];
+};
 
 enum ConnectionState {
   LISTENING,
@@ -274,6 +289,74 @@ static err_t accept_callback(void *arg, struct tcp_pcb *pcb, err_t err) {
   return ERR_OK;
 }
 
+static size_t get_string(char *dst, size_t limit) {
+  int c;
+  size_t i = 0;
+  while (i < limit - 1) {
+    c = getchar();
+    putchar(c);
+    if (c == '\r' || c == '\n')
+      break;
+    dst[i++] = c;
+  }
+  if (i > 0 && dst[i - 1] == '\r')
+    --i;
+  dst[i] = '\0';
+  return i;
+}
+
+static void connect(void) {
+  // Find first unprogrammed page from the last sector
+  // (starting from the second page).
+  unsigned char *p = (unsigned char *)(XIP_BASE + PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE + FLASH_PAGE_SIZE);
+  for (; p < (unsigned char *)(XIP_BASE + PICO_FLASH_SIZE_BYTES); p += FLASH_PAGE_SIZE) {
+    if (*(int *)p == -1)
+      break;
+  }
+
+  // The previous page must be the last programmed page.
+  struct WiFiCredentials *creds = (struct WiFiCredentials *)(p - FLASH_PAGE_SIZE);
+  bool flash_empty = true;
+  for (size_t i = 0; i < SSID_SIZE; ++i) {
+    if (creds->ssid[i] != 0xFF) {
+      flash_empty = false;
+      break;
+    }
+  }
+  if (!flash_empty) {
+    printf("Found credentials in the flash.\n");
+    if (!cyw43_arch_wifi_connect_timeout_ms(creds->ssid, creds->password, CYW43_AUTH_WPA2_AES_PSK, 30000)) {
+      printf("Connected.\n");
+      return;
+    }
+  }
+
+  struct WiFiCredentials new_creds;
+  do {
+    printf("Connection failed!\nEnter WiFi SSID: ");
+    get_string(new_creds.ssid, SSID_SIZE);
+    printf("\nEnter WiFi password: ");
+    get_string(new_creds.password, PASSWORD_SIZE);
+    printf("\n");
+  } while (cyw43_arch_wifi_connect_timeout_ms(new_creds.ssid, new_creds.password, CYW43_AUTH_WPA2_AES_PSK, 30000));
+  printf("Connected.\n");
+
+  uint32_t flash_offset;
+  uint32_t interrupts = save_and_disable_interrupts();
+  if (p >= (unsigned char *)XIP_BASE + PICO_FLASH_SIZE_BYTES) {
+    printf("Erasing flash.\n");
+    flash_range_erase(PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE, FLASH_SECTOR_SIZE);
+    printf("Erase complete.\n");
+    flash_offset = PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE;
+  } else {
+    flash_offset = (uint32_t)(p - XIP_BASE);
+  }
+  printf("Programming flash.\n");
+  flash_range_program(flash_offset, (const uint8_t *)&new_creds, FLASH_PAGE_SIZE);
+  printf("Programming complete.\n");
+  restore_interrupts(interrupts);
+}
+
 int main() {
   // TODO: Setup GPIO LED and button (with interrupts?).
   stdio_init_all();
@@ -282,14 +365,7 @@ int main() {
     return 1;
   }
   cyw43_arch_enable_sta_mode();
-
-  // TODO: Read/write WiFi SSID and password from/to flash memory.
-  // Get initially from UART?
-  if (cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASSWORD, CYW43_AUTH_WPA2_AES_PSK, 30000)) {
-    printf("Failed to connect.\n");
-    return 1;
-  }
-  printf("Connected.\n");
+  connect();
 
   struct tcp_pcb *pcb = tcp_new_ip_type(IPADDR_TYPE_ANY);
   if (!pcb) {
