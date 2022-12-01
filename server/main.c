@@ -5,6 +5,7 @@
 #include <assert.h>
 
 #include "boards/pico_w.h"
+#include "hardware/gpio.h"
 #include "pico/stdio.h"
 #include "pico/stdlib.h"
 #include "pico/error.h"
@@ -34,7 +35,8 @@
 #define WS_OP_PING 0x09
 #define WS_OP_PONG 0x0A
 
-#define LED_GPIO 0
+#define BUTTON_GPIO 15
+#define LED_GPIO 16
 #define REQUEST_BUF_SIZE 512
 #define BASE64_ENCODED_SIZE 29
 #define PORT 80
@@ -175,9 +177,8 @@ static void send_websocket_close_frame(void) {
 
 static void set_led_state(bool on) {
   if (on != *led_state) {
-    // TODO: use pico GPIO LED instead of cyw43 LED?
     printf("Turning LED %s.\n", on ? "on" : "off");
-    cyw43_arch_gpio_put(LED_GPIO, on);
+    gpio_put(LED_GPIO, on);
     *led_state = on;
   }
   send_led_state();
@@ -363,9 +364,21 @@ static void connect(void) {
   restore_interrupts(interrupts);
 }
 
+void button_callback(uint gpio, uint32_t events) {
+  set_led_state(!*led_state);
+}
+
 int main() {
-  // TODO: Setup GPIO LED and button (with interrupts?).
   stdio_init_all();
+
+  gpio_init(BUTTON_GPIO);
+  gpio_set_dir(BUTTON_GPIO, false);
+  gpio_set_irq_enabled_with_callback(BUTTON_GPIO, GPIO_IRQ_EDGE_RISE, true, button_callback);
+  gpio_pull_down(BUTTON_GPIO);
+
+  gpio_init(LED_GPIO);
+  gpio_set_dir(LED_GPIO, true);
+
   if (cyw43_arch_init()) {
     printf("Failed to initialize.\n");
     return 1;
